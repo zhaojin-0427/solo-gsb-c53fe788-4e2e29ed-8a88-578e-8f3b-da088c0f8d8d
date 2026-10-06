@@ -26,9 +26,11 @@
 得到各自的 acceptance_id、各自绑定的报告与原样保存的 measurements.csv，
 绝不共享目录，因此不存在“同身份下原件错配”。逐点结论只取决于规范测点，
 故两份提交的逐点结果相同；完全相同的 CSV 字节重复提交稳定命中同一目录
-复用。下载 measurements.csv 前会重新计算其 SHA-256 并与报告固化摘要核对，
-摘要不符（归档文件被替换）一律拒绝下载；命中缓存时若发现归档原件缺失或
-摘要不符，则用本次提交的同摘要字节原样修复后复用。
+复用。下载 measurements.csv 时先读出归档字节、核对其 SHA-256 与报告固化
+摘要一致，随后**直接交付这份已核验字节**（不再按路径二次打开，也不依赖
+已打开的句柄——原位改写对二者都不可防御）：归档在核验后被替换或原位改写，
+也不会交出与报告不符的内容；摘要不符一律拒绝下载。命中缓存时若发现归档
+原件缺失或摘要不符，则用本次提交的同摘要字节原样修复后复用。
 
 下列情况一律拒绝验收（422/404），绝不用原任务值代替修色测点：修色不可达、
 修色报告或成品与任务/ICC 绑定不符、原印刷 ICC 缺失或摘要不符、测点越界、
@@ -440,13 +442,20 @@ def read_stored_csv(csv_path: Path) -> bytes | None:
         return None
 
 
+def csv_bytes_match_report(report: dict, blob: bytes) -> bool:
+    """给定字节的 SHA-256 是否与报告固化的原件摘要严格一致。"""
+    expected = report.get("measurements_csv_sha256")
+    return (
+        isinstance(expected, str)
+        and len(expected) == 64
+        and hashlib.sha256(blob).hexdigest() == expected
+    )
+
+
 def stored_csv_matches_report(report: dict, csv_path: Path) -> bool:
     """归档 measurements.csv 的 SHA-256 是否与报告固化摘要严格一致。"""
-    expected = report.get("measurements_csv_sha256")
-    if not isinstance(expected, str) or len(expected) != 64:
-        return False
     blob = read_stored_csv(csv_path)
-    return blob is not None and hashlib.sha256(blob).hexdigest() == expected
+    return blob is not None and csv_bytes_match_report(report, blob)
 
 
 # ---------------------------------------------------------------------------

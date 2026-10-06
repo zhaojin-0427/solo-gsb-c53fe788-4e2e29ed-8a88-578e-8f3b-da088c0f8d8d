@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -676,21 +676,30 @@ def get_acceptance_report(acceptance_id: str):
 def get_acceptance_csv(acceptance_id: str):
     base = _require_acceptance(acceptance_id)
     csv_path = base / "measurements.csv"
-    if not csv_path.exists():
+    # 摘要核验与响应交付必须使用同一份字节：先读出归档原件（缺失/不可读
+    # 按 404），核验通过后直接交付这份内存字节——不再按路径二次打开，也不
+    # 依赖已打开的句柄（原位改写对二者都不可防御）。若核验后归档被替换或
+    # 原位改写，交出的仍是与报告摘要一致的那份字节。
+    blob = ac.read_stored_csv(csv_path)
+    if blob is None:
         raise HTTPException(404, "验收测点 CSV 不存在")
     try:
         report = json.loads((base / "report.json").read_text("utf-8"))
     except (json.JSONDecodeError, OSError):
         raise HTTPException(422, "验收报告不可读，无法核验测点原件摘要")
-    # 交出原件前重新计算 SHA-256 并与报告固化摘要核对：归档 CSV 被另一份字节
+    # 交出原件前核对其 SHA-256 与报告固化摘要：归档 CSV 被另一份字节
     # 替换时绝不下载与报告摘要不符的文件。
-    if not ac.stored_csv_matches_report(report, csv_path):
+    if not ac.csv_bytes_match_report(report, blob):
         raise HTTPException(
             422, "归档测点 CSV 与验收报告记录的 SHA-256 摘要不符，拒绝下载"
         )
-    return FileResponse(
-        csv_path, media_type="text/csv",
-        filename=f"measurements-{acceptance_id[:12]}.csv",
+    return Response(
+        content=blob,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="measurements-{acceptance_id[:12]}.csv"'
+        },
     )
 
 

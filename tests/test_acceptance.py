@@ -538,9 +538,13 @@ def test_report_endpoint_and_csv_artifact(client, ids):
     rr = client.get(f"/api/acceptance/{d['acceptance_id']}/report")
     assert rr.status_code == 200
     assert rr.headers["content-type"].startswith("application/json")
-    # 原始 CSV 原样保存可下载。
+    # 原始 CSV 原样保存可下载：字节、CSV 内容类型与原下载文件名均保留。
     cc = client.get(f"/api/acceptance/{d['acceptance_id']}/measurements.csv")
     assert cc.status_code == 200 and cc.content == csv_bytes
+    assert cc.headers["content-type"].startswith("text/csv")
+    assert cc.headers["content-disposition"] == (
+        f'attachment; filename="measurements-{d["acceptance_id"][:12]}.csv"'
+    )
 
 
 def test_header_aliases_accepted(client, ids):
@@ -643,6 +647,44 @@ def test_tampered_archived_csv_rejected_for_download_and_healed_on_repost(client
         assert rr.json()["acceptance_id"] == aid
         healed = client.get(f"/api/acceptance/{aid}/measurements.csv")
         assert healed.status_code == 200 and healed.content == csv_bytes
+    finally:
+        csv_path.write_bytes(csv_bytes)
+
+
+def test_download_delivers_the_same_bytes_that_were_verified(client, ids, monkeypatch):
+    """核验与交付必须是同一份字节：核验读取后归档被原位改写，响应仍须是已核验字节。
+
+    若实现退回“核验后按路径/句柄再次打开”（如 FileResponse），本用例会交出
+    改写后的伪造字节而失败。
+    """
+    from app import acceptance as ac
+    from app import main
+    job = _run_job(client, ids)
+    preds = _lab_press_at(client, job["job_id"], [(0, 0)])
+    csv_bytes = _csv(_points_from_preds([(0, 0)], preds))
+    d = _accept(client, job["job_id"], csv_bytes, limit=3.0).json()
+    aid = d["acceptance_id"]
+    csv_path = main.ACCEPTANCE_DIR / aid / "measurements.csv"
+    forged = b"x,y,L,a,b\n0,0,12.0,3.4,-5.6\n"
+    assert forged != csv_bytes
+
+    real_read = ac.read_stored_csv
+
+    def read_then_rewrite_in_place(path):
+        blob = real_read(path)
+        # 模拟核验读取之后、响应生成之前归档被原位改写。
+        csv_path.write_bytes(forged)
+        return blob
+
+    monkeypatch.setattr(ac, "read_stored_csv", read_then_rewrite_in_place)
+    try:
+        r = client.get(f"/api/acceptance/{aid}/measurements.csv")
+        assert r.status_code == 200
+        # 交付的必须是核验时读到的同一份字节，而非改写后的文件内容。
+        assert r.content == csv_bytes
+        assert r.headers["content-type"].startswith("text/csv")
+        assert r.headers["content-disposition"] == \
+            f'attachment; filename="measurements-{aid[:12]}.csv"'
     finally:
         csv_path.write_bytes(csv_bytes)
 
