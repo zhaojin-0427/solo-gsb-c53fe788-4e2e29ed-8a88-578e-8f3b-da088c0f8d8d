@@ -224,7 +224,7 @@ x,y,L,a,b
 | 测点坐标越界、负坐标、非整数、Lab 越界/非有限值 | 拒绝 |
 | CSV 空文件、只有表头、缺列/多列、行列数不齐、非 UTF-8 | 拒绝 |
 | ΔE00 上限为负或非有限值 | 拒绝 |
-| 下载 `measurements.csv` 时归档原件的 SHA-256 与报告固化摘要不符（被替换） | 拒绝下载（`422`），重新提交相同 CSV 可修复归档 |
+| 下载 `measurements.csv`：报告不可读，或归档原件 SHA-256 与报告固化摘要不符（被替换/原位改写）；原件缺失 | 报告不可读/摘要不符拒绝下载（`422`），重新提交相同 CSV 可修复归档；原件缺失 `404` |
 
 ### 报告与产物
 
@@ -234,12 +234,12 @@ x,y,L,a,b
 - `measurements.csv`：提交的原始 CSV 字节，可原样下载；
 - **身份包含原始 CSV 字节摘要**：两份 CSV 即使解析出**完全相同的测点序列**（仅表头别名写法、单元格/表头空白、BOM 或换行风格不同），也会被判定为**各自独立、分别寻址**的验收——得到各自的 `acceptance_id`、各自绑定的报告与原样保存的 `measurements.csv`，互不串用。由于逐点结论只取决于规范测点与上限，两份提交的逐点结果一致；
 - 相同输入（含相同 CSV 字节）命中同一报告（无时间戳，结果确定）；**命中缓存时仍按当前任务分色、原印刷 ICC 与已核验成品逐点重算并比对报告**，任何绑定/数值不符一律拒绝，不静默复用；
-- **原件绑定**：命中缓存时还会核对归档 `measurements.csv` 的 SHA-256 与报告固化摘要，若归档原件缺失或被替换，用本次提交的、摘要相同的字节原样修复后再复用；**下载 `measurements.csv` 前会重新计算 SHA-256 并与报告摘要核对，原件与报告摘要不符（归档文件被另一份 CSV 替换）一律 `422` 拒绝下载**，绝不交出与报告不符的文件。
+- **原件绑定**：命中缓存时还会核对归档 `measurements.csv` 的 SHA-256 与报告固化摘要，若归档原件缺失或被替换，用本次提交的、摘要相同的字节原样修复后再复用；**下载 `measurements.csv` 时服务一次性读入归档原件字节，以这同一份内存字节重新计算 SHA-256 并与报告摘要核对，核验通过后直接把该字节作为响应体交付**（不按路径交给 FileResponse 重新打开，因而归档即使在“核验后、响应读取前”被替换或原位改写，也不可能交出与报告摘要不符的内容）；原件缺失 `404`，报告不可读或摘要不符（归档文件被另一份 CSV 替换/原位改写）一律 `422` 拒绝下载。
 
 ### 查看验收结果
 
-- **一键启动后在页面访问**：`docker compose up -d --build` 后浏览器打开 **http://localhost:8000**，进入顶部导航的 **印后测色验收** 视图即可上传 CSV、执行验收；提交后结果面板显示合格/不合格、超限图上标注、超限坐标与逐点表，并提供**报告 JSON / 测点 CSV 下载按钮**（Docker 卷 `softproof-data` 内即 `/data/acceptance/<id>/`，重启后仍在）；
-- **接口/文件**：`GET /api/acceptance/{id}` 与 `/report` 取验收报告 JSON，`GET /api/acceptance/{id}/measurements.csv` 下载提交的测点（与报告摘要不符时 `422`）；`GET /api/jobs/{job_id}/retouches` 列出该任务下可绑定的达标修色。产物同时位于数据卷 `/data/acceptance/<id>/`。
+- **一键启动后在页面访问**：`docker compose up -d --build` 后浏览器打开 **http://localhost:8000**，进入顶部导航的 **印后测色验收** 视图即可上传 CSV、执行验收；提交后结果面板显示合格/不合格、超限图上标注、超限坐标与逐点表，并提供**报告 JSON / 测点 CSV 下载按钮**——点击“下载所提交测点 CSV”（或直接访问 `http://localhost:8000/api/acceptance/<验收ID>/measurements.csv`）即按上述“核验与交付同一份字节”的方式取回**与上传件逐字节一致的原件**（`text/csv`，文件名 `measurements-<验收ID前12位>.csv`）；Docker 卷 `softproof-data` 内即 `/data/acceptance/<id>/`，重启后仍在；
+- **接口/文件**：`GET /api/acceptance/{id}` 与 `/report` 取验收报告 JSON，`GET /api/acceptance/{id}/measurements.csv` 下载提交的测点（交付前对同一份字节做 SHA-256 核对：原件缺失 `404`，报告不可读或摘要不符 `422`）；`GET /api/jobs/{job_id}/retouches` 列出该任务下可绑定的达标修色。产物同时位于数据卷 `/data/acceptance/<id>/`。
 
 ---
 
@@ -361,7 +361,7 @@ x,y,L,a,b
 | GET | `/api/jobs/{id}/retouches` | 该任务下可用于印后验收的达标修色成品列表 |
 | POST | `/api/acceptance` | 印后测色验收（multipart：`job_id`、`file`(测点 CSV)、`limit_de`、可选 `retouch_id`）；任一点超限整张不合格 |
 | GET | `/api/acceptance/{aid}` / `/report` | 验收报告 JSON（绑定任务/可选修色/ICC 摘要/全部测点） |
-| GET | `/api/acceptance/{aid}/measurements.csv` | 下载提交的测点 CSV（SHA-256 与报告摘要核对；不符返回 422） |
+| GET | `/api/acceptance/{aid}/measurements.csv` | 下载提交的测点 CSV：一次性读入字节、对同一份字节核对报告 SHA-256 后直接交付（原件缺失 404；报告不可读/摘要不符 422） |
 
 ### 发布与回归门禁 API（前缀 `/api/release`）
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -682,15 +682,23 @@ def get_acceptance_csv(acceptance_id: str):
         report = json.loads((base / "report.json").read_text("utf-8"))
     except (json.JSONDecodeError, OSError):
         raise HTTPException(422, "验收报告不可读，无法核验测点原件摘要")
-    # 交出原件前重新计算 SHA-256 并与报告固化摘要核对：归档 CSV 被另一份字节
-    # 替换时绝不下载与报告摘要不符的文件。
-    if not ac.stored_csv_matches_report(report, csv_path):
-        raise HTTPException(
-            422, "归档测点 CSV 与验收报告记录的 SHA-256 摘要不符，拒绝下载"
-        )
-    return FileResponse(
-        csv_path, media_type="text/csv",
-        filename=f"measurements-{acceptance_id[:12]}.csv",
+    # 一次性读入归档原件字节，以**这同一份字节**核对 SHA-256，随后直接交付
+    # 这份已核验字节（而非按路径交给 FileResponse 重新打开）：归档在核验后、
+    # 响应读取前被替换或原位改写，也不可能交出与报告摘要不符的内容。
+    try:
+        blob = ac.load_verified_csv_bytes(report, csv_path)
+    except FileNotFoundError:
+        raise HTTPException(404, "验收测点 CSV 不存在")
+    except ac.AcceptanceError as exc:
+        raise HTTPException(422, str(exc))
+    return Response(
+        content=blob,
+        media_type="text/csv",
+        headers={
+            "content-disposition": (
+                f'attachment; filename="measurements-{acceptance_id[:12]}.csv"'
+            ),
+        },
     )
 
 

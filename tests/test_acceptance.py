@@ -647,6 +647,60 @@ def test_tampered_archived_csv_rejected_for_download_and_healed_on_repost(client
         csv_path.write_bytes(csv_bytes)
 
 
+def test_csv_download_uses_verified_bytes_despite_in_place_rewrite(client, ids, monkeypatch):
+    """核验后、响应读取前归档被替换/原位改写：交付的仍必须是已核验的同一份字节。"""
+    import app.main as main_mod
+    import app.acceptance as ac_mod
+
+    job = _run_job(client, ids)
+    preds = _lab_press_at(client, job["job_id"], [(0, 0)])
+    csv_bytes = _csv(_points_from_preds([(0, 0)], preds))
+    d = _accept(client, job["job_id"], csv_bytes, limit=3.0).json()
+    aid = d["acceptance_id"]
+    csv_path = main_mod.ACCEPTANCE_DIR / aid / "measurements.csv"
+    forged = b"x,y,L,a,b\n0,0,12.0,3.4,-5.6\n"
+
+    real_load = ac_mod.load_verified_csv_bytes
+    state = {"verified": False}
+
+    def tamper_after_verify(report, path):
+        # 先按真实流程读入并核验字节，再模拟“核验之后、响应读取之前”磁盘被改写。
+        blob = real_load(report, path)
+        path.write_bytes(forged)
+        state["verified"] = True
+        return blob
+
+    # main.py 经 ac.load_verified_csv_bytes（模块属性）调用，补丁生效；若端点
+    # 退回“按路径交给 FileResponse 重新打开”，则不会经过本函数且会泄出 forged。
+    monkeypatch.setattr(ac_mod, "load_verified_csv_bytes", tamper_after_verify)
+    cc = client.get(f"/api/acceptance/{aid}/measurements.csv")
+    assert state["verified"] is True
+    assert cc.status_code == 200
+    assert cc.content == csv_bytes
+    assert cc.content != forged
+    assert cc.headers["content-type"].startswith("text/csv")
+    assert f"measurements-{aid[:12]}.csv" in cc.headers["content-disposition"]
+
+
+def test_unreadable_report_blocks_csv_download_422(client, ids):
+    """报告 JSON 损坏不可读时无法核对摘要：下载 422（而非交出文件）。"""
+    from app import main
+    job = _run_job(client, ids)
+    preds = _lab_press_at(client, job["job_id"], [(0, 0)])
+    csv_bytes = _csv(_points_from_preds([(0, 0)], preds))
+    d = _accept(client, job["job_id"], csv_bytes, limit=3.0).json()
+    aid = d["acceptance_id"]
+    report_path = main.ACCEPTANCE_DIR / aid / "report.json"
+    backup = report_path.read_bytes()
+    report_path.write_bytes(b"{ this is not valid json")
+    try:
+        cc = client.get(f"/api/acceptance/{aid}/measurements.csv")
+        assert cc.status_code == 422
+        assert "报告" in cc.json()["detail"]
+    finally:
+        report_path.write_bytes(backup)
+
+
 def test_missing_archived_csv_healed_on_identical_repost(client, ids):
     """归档原件缺失时，重复提交同文件应恢复原件并复用。"""
     from app import main

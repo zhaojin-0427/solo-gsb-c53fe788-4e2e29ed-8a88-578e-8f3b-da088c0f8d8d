@@ -26,9 +26,12 @@
 得到各自的 acceptance_id、各自绑定的报告与原样保存的 measurements.csv，
 绝不共享目录，因此不存在“同身份下原件错配”。逐点结论只取决于规范测点，
 故两份提交的逐点结果相同；完全相同的 CSV 字节重复提交稳定命中同一目录
-复用。下载 measurements.csv 前会重新计算其 SHA-256 并与报告固化摘要核对，
-摘要不符（归档文件被替换）一律拒绝下载；命中缓存时若发现归档原件缺失或
-摘要不符，则用本次提交的同摘要字节原样修复后复用。
+复用。下载 measurements.csv 时一次性读入归档原件字节，以**这同一份内存字节**
+重新计算 SHA-256 并与报告固化摘要核对，核验通过后直接把该字节作为响应体
+交付——绝不先核验路径再由 FileResponse 按路径重新打开（仅持有已核验路径/
+句柄无法阻止核验后、响应读取前的原位改写）；摘要不符（归档文件被替换或
+原位改写）一律拒绝下载；命中缓存时若发现归档原件缺失或摘要不符，则用本次
+提交的同摘要字节原样修复后复用。
 
 下列情况一律拒绝验收（422/404），绝不用原任务值代替修色测点：修色不可达、
 修色报告或成品与任务/ICC 绑定不符、原印刷 ICC 缺失或摘要不符、测点越界、
@@ -447,6 +450,33 @@ def stored_csv_matches_report(report: dict, csv_path: Path) -> bool:
         return False
     blob = read_stored_csv(csv_path)
     return blob is not None and hashlib.sha256(blob).hexdigest() == expected
+
+
+def load_verified_csv_bytes(report: object, csv_path: Path) -> bytes:
+    """一次性读入归档原件并与报告固化摘要核对，返回**已核验的同一份字节**。
+
+    核验与交付必须共用这一份内存字节：只持有已核验的路径或文件句柄，无法
+    阻止归档在核验后被另一份字节替换或原位改写，因此不能先核对、再让
+    FileResponse 按路径重新打开。这里把 ``read_bytes()`` 得到的 blob 既作为
+    SHA-256 的核验输入，又作为下载响应体，核验之后磁盘如何变化都与本次
+    交付无关（TOCTOU 被消除）。
+
+    * 原件缺失：FileNotFoundError（调用方映射 404）；
+    * 报告无合法摘要 / 原件不可读 / 摘要不符：AcceptanceError（422）。
+    """
+    expected = None
+    if isinstance(report, dict):
+        candidate = report.get("measurements_csv_sha256")
+        if isinstance(candidate, str) and len(candidate) == 64:
+            expected = candidate
+    if expected is None:
+        raise AcceptanceError("验收报告缺少有效的测点原件 SHA-256 摘要，无法核验")
+    blob = read_stored_csv(csv_path)
+    if blob is None:
+        raise AcceptanceError("归档测点 CSV 不可读，无法核验测点原件摘要")
+    if hashlib.sha256(blob).hexdigest() != expected:
+        raise AcceptanceError("归档测点 CSV 与验收报告记录的 SHA-256 摘要不符，拒绝下载")
+    return blob
 
 
 # ---------------------------------------------------------------------------
